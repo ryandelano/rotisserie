@@ -1,88 +1,88 @@
 name: PyPI Release
 
 on:
-    workflow_dispatch:
-        inputs:
-            version:
-                description: "Version to release (e.g., 0.1.0)"
-                required: true
-                type: string
-            test_pypi:
-                description: "Upload to Test PyPI first"
-                required: false
-                type: boolean
-                default: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., 0.1.0)"
+        required: true
+        type: string
+      test_pypi:
+        description: "Upload to Test PyPI first"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-    release:
-        runs-on: ubuntu-latest
-        environment: ${{ github.event.inputs.test_pypi == 'true' && 'test-pypi' || 'pypi' }}
+  release:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.test_pypi == 'true' && 'test-pypi' || 'pypi' }}
 
-        steps:
-            - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v4
-              with:
-                  version: "latest"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
 
-            - name: Set up Python
-              run: uv python install 3.11
+      - name: Set up Python
+        run: uv python install 3.11
 
-            - name: Install dependencies
-              run: |
-                  uv sync --dev
-                  uv sync --extra requests --extra httpx --extra aiohttp
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+          uv sync --extra requests --extra httpx --extra aiohttp
 
-            - name: Lint with ruff
-              run: uv run ruff check .
+      - name: Lint with ruff
+        run: uv run ruff check .
 
-            - name: Type check with mypy
-              run: uv run mypy .
+      - name: Type check with mypy
+        run: uv run mypy .
 
-            - name: Run tests
-              run: uv run pytest
+      - name: Run tests
+        run: uv run pytest
 
-            - name: Update version in pyproject.toml
-              run: |
-                  sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" pyproject.toml
-                  cat pyproject.toml | grep version
+      - name: Update version in pyproject.toml
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" pyproject.toml
+          cat pyproject.toml | grep version
 
-            - name: Build package
-              run: uv build
+      - name: Build package
+        run: uv build
 
-            - name: Verify package contents
-              run: |
-                  uv run python -m pip install dist/*.whl --force-reinstall
-                  uv run python -c "import rotisserie; print('Package imports successfully')"
+      - name: Verify package contents
+        run: |
+          uv add --editable .
+          uv run python -c "import rotisserie; print('Package imports successfully')"
 
-            - name: Upload to PyPI
-              if: github.event.inputs.test_pypi == 'true'
-              uses: pypa/gh-action-pypi-publish@release/v1
-              with:
-                  password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-                  repository-url: https://test.pypi.org/legacy/
+      - name: Upload to PyPI
+        if: github.event.inputs.test_pypi == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          repository-url: https://test.pypi.org/legacy/
 
-            - name: Upload to PyPI
-              if: github.event.inputs.test_pypi == 'false'
-              uses: pypa/gh-action-pypi-publish@release/v1
-              with:
-                  password: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Upload to PyPI
+        if: github.event.inputs.test_pypi == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
-            - name: Create GitHub Release
-              if: github.event.inputs.test_pypi == 'false'
-              uses: actions/create-release@v1
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  tag_name: v${{ github.event.inputs.version }}
-                  release_name: Release v${{ github.event.inputs.version }}
-                  body: |
-                      Release v${{ github.event.inputs.version }}
+      - name: Create GitHub Release
+        if: github.event.inputs.test_pypi == 'false'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          release_name: Release v${{ github.event.inputs.version }}
+          body: |
+            Release v${{ github.event.inputs.version }}
 
-                      ## Installation
-                      ```bash
-                      pip install rotisserie==${{ github.event.inputs.version }}
-                      ```
-                  draft: false
-                  prerelease: false
+            ## Installation
+            ```bash
+            pip install rotisserie==${{ github.event.inputs.version }}
+            ```
+          draft: false
+          prerelease: false

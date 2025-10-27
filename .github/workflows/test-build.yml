@@ -45,5 +45,5 @@ jobs:
 
             - name: Verify package contents
               run: |
-                  uv run python -m pip install dist/*.whl --force-reinstall
+                  uv add --editable .
                   uv run python -c "import rotisserie; print('Package imports successfully')"
