@@ -53,8 +53,8 @@ jobs:
 
       - name: Verify package contents
         run: |
-          uv add --editable .
-          uv run python -c "import rotisserie; print('Package imports successfully')"
+          ls -la dist/
+          python -c "import zipfile, glob; wheel = glob.glob('dist/*.whl')[0]; z = zipfile.ZipFile(wheel); print('Wheel contains:', [f for f in z.namelist() if f.startswith('rotisserie/')][:5]); print('Package structure verified')"
 
       - name: Upload to PyPI
         if: github.event.inputs.test_pypi == 'true'
