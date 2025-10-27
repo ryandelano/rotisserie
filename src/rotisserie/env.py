@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterable
+from typing import Union
 
 from .types import KeyConfig
 
@@ -31,10 +32,10 @@ def _parse_env_file(env_path: str) -> dict[str, str]:
 
 
 def load_keyconfigs_from_env(
-    names: Iterable[str] | None = None,
-    prefix: str | None = None,
-    per_window: tuple[int, int] | None = None,
-    env_path: str | None = None,
+    names: Union[Iterable[str], None] = None,
+    prefix: Union[str, None] = None,
+    per_window: Union[tuple[int, int], None] = None,
+    env_path: Union[str, None] = None,
     **kwargs,
 ) -> list[KeyConfig]:
     """Create KeyConfig objects from environment variables.

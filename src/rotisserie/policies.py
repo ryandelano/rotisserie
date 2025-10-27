@@ -1,6 +1,7 @@
 import inspect
 import random
 import time
+from typing import Callable, Union
 
 from .state import KeyState
 
@@ -57,7 +58,7 @@ class FunctionalPolicy(AllocationPolicy):
         - select_fn(available, n) -> list[KeyState]
     """
 
-    def __init__(self, select_fn: callable):
+    def __init__(self, select_fn: Callable):
         self.select_fn = select_fn
 
     def select_keys(self, available, n, endpoint):
@@ -83,7 +84,7 @@ class KeyFunctionPolicy(AllocationPolicy):
         - key_fn(key, endpoint) -> comparable
     """
 
-    def __init__(self, key_fn: callable):
+    def __init__(self, key_fn: Callable):
         self.key_fn = key_fn
 
     def select_keys(self, available, n, endpoint):
@@ -96,7 +97,7 @@ class KeyFunctionPolicy(AllocationPolicy):
         return ranked[:n]
 
 
-def coerce_policy(policy: object | None) -> AllocationPolicy:
+def coerce_policy(policy: Union[object, None]) -> AllocationPolicy:
     """Turn None | str | AllocationPolicy | callable into an AllocationPolicy.
 
     Accepted inputs:

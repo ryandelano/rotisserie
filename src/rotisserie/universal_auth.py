@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from typing import Union
 
 from .types import AuthConfig, RetryConfig
 
@@ -34,16 +35,16 @@ class UniversalAuth:
         self.reserve = reserve
         self.priority = priority
         # Prefer config objects, then inherit from pool, finally fall back to args
-        pool_auth: AuthConfig | None = getattr(pool, "_auth_config", None)
-        use_auth: AuthConfig | None = kwargs.get("auth_config", pool_auth)
+        pool_auth: Union[AuthConfig, None] = getattr(pool, "_auth_config", None)
+        use_auth: Union[AuthConfig, None] = kwargs.get("auth_config", pool_auth)
         if use_auth is not None:
             self.auth_header = use_auth.header
             self.auth_scheme = use_auth.scheme
         else:
             self.auth_header = kwargs.get("auth_header", "Authorization")
             self.auth_scheme = kwargs.get("auth_scheme", "Bearer")
-        pool_retry: RetryConfig | None = getattr(pool, "_retry_config", None)
-        use_retry: RetryConfig | None = kwargs.get("retry_config", pool_retry)
+        pool_retry: Union[RetryConfig, None] = getattr(pool, "_retry_config", None)
+        use_retry: Union[RetryConfig, None] = kwargs.get("retry_config", pool_retry)
         if use_retry is not None:
             self.retry_attempts = use_retry.retry_attempts
             self.retry_for_methods = {m.upper() for m in use_retry.retry_for_methods}
@@ -406,7 +407,7 @@ class UniversalAuth:
                         )
                         if (
                             request.method.upper() not in retry_for
-                            or getattr(resp, "status_code", None) != 429 # noqa: PLR2004, http status code can be constant
+                            or getattr(resp, "status_code", None) != 429  # noqa: PLR2004, http status code can be constant
                         ):
                             return resp
                         with contextlib.suppress(Exception):
@@ -458,7 +459,7 @@ class UniversalAuth:
                         )
                         if (
                             request.method.upper() not in retry_for
-                            or getattr(resp, "status_code", None) != 429 # noqa: PLR2004, http status code can be constant
+                            or getattr(resp, "status_code", None) != 429  # noqa: PLR2004, http status code can be constant
                         ):
                             return resp
                         with contextlib.suppress(Exception):

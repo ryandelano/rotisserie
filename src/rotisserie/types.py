@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Union
 
 
 @dataclass
@@ -7,7 +7,7 @@ class KeyConfig:
     name: str
     token: str
     # Optional: estimated local per-key window (requests, seconds). If None, react to 429 only.
-    per_window: tuple[int, int] | None = None
+    per_window: Union[tuple[int, int], None] = None
 
 
 @dataclass(frozen=True)

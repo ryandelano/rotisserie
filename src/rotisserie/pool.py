@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from typing import Union
 
 from .env import load_keyconfigs_from_env
 from .policies import AllocationPolicy, EvenSplitPolicy, coerce_policy
@@ -54,9 +55,9 @@ class _Scheduler:
     def __init__(
         self,
         keys: list[KeyConfig],
-        policy: AllocationPolicy | None,
+        policy: Union[AllocationPolicy, None],
         distribute: bool,
-        retry_config: RetryConfig | None,
+        retry_config: Union[RetryConfig, None],
     ):
         """Initialize a _Scheduler.
 
@@ -195,7 +196,7 @@ class _Scheduler:
             self._assign_extras_funnel(extra_pool, by_pri)
 
     # --- select a key for an endpoint (non-blocking) ---
-    def _pick_candidate(self, endpoint: str) -> KeyState | None:
+    def _pick_candidate(self, endpoint: str) -> Union[KeyState, None]:
         now = self._now()
         for k in self._keys:
             self._reset_window_if_needed(k, now)
@@ -216,9 +217,9 @@ class _Scheduler:
     def _mark_result(
         self,
         key: KeyState,
-        status_code: int | None,
+        status_code: Union[int, None],
         headers: dict[str, str],
-        error: BaseException | None,
+        error: Union[BaseException, None],
     ):
         now = self._now()
         if status_code == 429:  # noqa: PLR2004, http status code can be constant
@@ -254,18 +255,18 @@ class KeyPool(_Scheduler):
     def __init__(
         self,
         keys: list[KeyConfig],
-        policy: object | None = None,
-        distribute: bool | None = None,
-        log_level: int | None = None,
+        policy: Union[object, None] = None,
+        distribute: Union[bool, None] = None,
+        log_level: Union[int, None] = None,
         **kwargs,
     ):
         """Initialize a KeyPool.
 
         Args:
             keys (list[KeyConfig]): list of KeyConfig objects
-            policy (object | None, optional): policy object or string ("even" | "weighted")
-            distribute (bool | None, optional): distribute keys across priorities
-            log_level (int | None, optional): log level
+            policy (Union[object, None], optional): policy object or string ("even" | "weighted")
+            distribute (Union[bool, None], optional): distribute keys across priorities
+            log_level (Union[int, None], optional): log level
             kwargs:
             - retry_config: RetryConfig object
             - retry_attempts: int
@@ -318,7 +319,7 @@ class KeyPool(_Scheduler):
             }
             self._retry_config = RetryConfig(
                 retry_attempts=self._max_attempts,
-                retry_for_methods=self._retry_methods,
+                retry_for_methods=list(self._retry_methods),
             )
         else:
             try:
@@ -328,7 +329,7 @@ class KeyPool(_Scheduler):
             self._retry_methods = {"GET", "HEAD", "OPTIONS"}
             self._retry_config = RetryConfig(
                 retry_attempts=self._max_attempts,
-                retry_for_methods=self._retry_methods,
+                retry_for_methods=list(self._retry_methods),
             )
         if log_level is not None:
             with contextlib.suppress(Exception):
@@ -357,9 +358,9 @@ class KeyPool(_Scheduler):
     def mark_result(
         self,
         key: KeyState,
-        status_code: int | None,
+        status_code: Union[int, None],
         headers: dict[str, str],
-        error: BaseException | None,
+        error: Union[BaseException, None],
     ) -> None:
         self._mark_result(key, status_code, headers, error)
 
@@ -368,17 +369,17 @@ class KeyPool(_Scheduler):
     def from_env(
         cls,
         names=None,
-        prefix: str | None = None,
-        per_window: tuple[int, int] | None = None,
-        env_path: str | None = None,
+        prefix: Union[str, None] = None,
+        per_window: Union[tuple[int, int], None] = None,
+        env_path: Union[str, None] = None,
         **kwargs,
     ):
         """from_env is a convenience method to create a KeyPool from environment variables.
 
         Args:
             names (_type_, optional): _description_. Defaults to None.
-            prefix (str | None, optional): _description_. Defaults to None.
-            env_path (str | None, optional): _description_. Defaults to None.
+            prefix (Union[str, None], optional): _description_. Defaults to None.
+            env_path (Union[str, None], optional): _description_. Defaults to None.
 
             kwargs keywords:
             to_lower_names: make names lowercase
@@ -433,9 +434,9 @@ class AsyncKeyPool(_Scheduler):
     def __init__(
         self,
         keys: list[KeyConfig],
-        policy: object | None = None,
-        distribute: bool | None = None,
-        log_level: int | None = None,
+        policy: Union[object, None] = None,
+        distribute: Union[bool, None] = None,
+        log_level: Union[int, None] = None,
         **kwargs,
     ):
         """Initialize an AsyncKeyPool.
@@ -484,7 +485,7 @@ class AsyncKeyPool(_Scheduler):
             }
             self._retry_config = RetryConfig(
                 retry_attempts=self._max_attempts,
-                retry_for_methods=self._retry_methods,
+                retry_for_methods=list(self._retry_methods),
             )
         else:
             try:
@@ -526,9 +527,9 @@ class AsyncKeyPool(_Scheduler):
     def mark_result(
         self,
         key: KeyState,
-        status_code: int | None,
+        status_code: Union[int, None],
         headers: dict[str, str],
-        error: BaseException | None,
+        error: Union[BaseException, None],
     ) -> None:
         self._mark_result(key, status_code, headers, error)
 
@@ -536,8 +537,8 @@ class AsyncKeyPool(_Scheduler):
     def from_env(
         cls,
         names=None,
-        prefix: str | None = None,
-        env_path: str | None = None,
+        prefix: Union[str, None] = None,
+        env_path: Union[str, None] = None,
         **kwargs,
     ):
         from .env import load_keyconfigs_from_env  # noqa: PLC0415
@@ -665,7 +666,7 @@ class _SyncEndpointClient:
                         url={url}"""
                     )
                 resp = sess.request(method, url, headers=headers, params=params, **kwargs)
-                self.pool._mark_result(key, resp.status_code, resp.headers, None)
+                self.pool._mark_result(key, resp.status_code, dict(resp.headers), None)
                 with contextlib.suppress(Exception):
                     self.pool._logger.debug(
                         f"""req done method={method} endpoint={self.endpoint} key={key.name}
