@@ -1,5 +1,8 @@
 name: PyPI Release
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -71,18 +74,15 @@ jobs:
 
       - name: Create GitHub Release
         if: github.event.inputs.test_pypi == 'false'
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ github.event.inputs.version }}
-          release_name: Release v${{ github.event.inputs.version }}
-          body: |
-            Release v${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.event.inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "Release v${{ github.event.inputs.version }}" \
+            --notes "Release v${{ github.event.inputs.version }}
 
-            ## Installation
-            ```bash
-            pip install rotisserie==${{ github.event.inputs.version }}
-            ```
-          draft: false
-          prerelease: false
+          ## Installation
+          ```bash
+          pip install rotisserie==${{ github.event.inputs.version }}
+          ```"
