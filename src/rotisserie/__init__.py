@@ -7,11 +7,13 @@ from .policies import (
     coerce_policy,
 )
 from .pool import AsyncKeyPool, KeyPool
+from .state import KeyState
 from .types import AuthConfig, KeyConfig, RetryConfig
 from .universal_auth import UniversalAuth
 
 __all__ = [
     "KeyConfig",
+    "KeyState",
     "AuthConfig",
     "RetryConfig",
     "KeyPool",

@@ -8,11 +8,11 @@ version = "0.1.0"
 description = "API key rotation + priority-aware scheduler layered on top of requests, httpx, and aiohttp."
 readme = "README.md"
 authors = [{name="Ryan Delano"}]
+license = "MIT"
 requires-python = ">=3.9"
 keywords = ["rate limiting", "api", "throttling", "requests", "httpx", "aiohttp", "rotation", "scheduler"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Internet :: WWW/HTTP",
 ]

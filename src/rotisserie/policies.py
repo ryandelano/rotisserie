@@ -20,6 +20,8 @@ def _count_positional_args(fn, default: int) -> int:
     """Return count of positional params for fn; fall back to default on failure."""
     try:
         sig = inspect.signature(fn)
+        if any(p.kind == p.VAR_POSITIONAL for p in sig.parameters.values()):
+            return max(default, DEFAULT_SELECTION_ARGC)
         return len(
             [
                 p
@@ -71,8 +73,10 @@ class FunctionalPolicy(AllocationPolicy):
             raise TypeError("Custom select function must return a List[KeyState]")
         if len(selected) > n:
             raise ValueError("Custom select function returned more keys than requested")
-        if any(k not in available for k in selected):
+        if any(not any(k is candidate for candidate in available) for k in selected):
             raise ValueError("Custom select function returned keys not in 'available'")
+        if len({id(k) for k in selected}) != len(selected):
+            raise ValueError("Custom select function returned duplicate keys")
         return selected
 
 

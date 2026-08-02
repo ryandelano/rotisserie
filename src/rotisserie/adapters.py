@@ -1,6 +1,36 @@
 import contextlib
+import inspect
+from collections.abc import Mapping
 
-from .pool import AsyncKeyPool, KeyPool
+from .pool import AsyncKeyPool, KeyPool, _require_dependency
+
+
+async def _release_response(response):
+    """Release a response whether the client library exposes sync or async release()."""
+    for name in ("aclose", "release", "close"):
+        release = getattr(response, name, None)
+        if release is None:
+            continue
+        result = release()
+        if inspect.isawaitable(result):
+            await result
+        return
+
+
+def _auth_values(pool, key, headers, params):
+    config = getattr(pool, "_auth_config", None)
+    if config is not None and config.in_ == "query":
+        if isinstance(params, Mapping):
+            params[config.query_param] = key.token
+        else:
+            params[:] = [
+                (name, value) for name, value in params if name != config.query_param
+            ]
+            params.append((config.query_param, key.token))
+    else:
+        header = config.header if config else "Authorization"
+        scheme = config.scheme if config else "Bearer"
+        headers[header] = f"{scheme} {key.token}".strip()
 
 
 # ---------- requests (sync) ----------
@@ -20,8 +50,7 @@ class RequestsClientContext:
         # bind session to client so it can reuse
         self.client = client
         if self.session is None:
-            import requests  # noqa: PLC0415
-
+            requests = _require_dependency("requests", "requests")
             self.client._session = requests.Session()
             self._own_session = True
         else:
@@ -88,41 +117,62 @@ class HttpxClientContext:
         return r
 
     async def request(self, method, url, **kwargs):
-        import httpx  # noqa: PLC0415
+        httpx = _require_dependency("httpx", "httpx")
 
-        client = self.client or getattr(self, "_internal_client", None)
+        client = self.client if self.client is not None else getattr(self, "_internal_client", None)
         if client is None:
             self._internal_client = client = httpx.AsyncClient()
-        attempts, last_err = 0, None
-        while attempts < getattr(self.pool, "_max_attempts", 8):
+        method = method.upper()
+        base_kwargs = dict(kwargs)
+        supplied_headers = dict(base_kwargs.pop("headers", {}) or {})
+        supplied_params = base_kwargs.pop("params", {}) or {}
+        if not isinstance(supplied_params, Mapping):
+            supplied_params = list(supplied_params)
+        attempts, last_err, last_resp = 0, None, None
+        max_attempts = getattr(self.pool, "_max_attempts", 8)
+        retry_methods = getattr(self.pool, "_retry_methods", {"GET", "HEAD", "OPTIONS"})
+        while attempts < max_attempts:
             key = await self.pool._take_key(self.endpoint)
-            headers = {**kwargs.pop("headers", {})}
-            params = {**kwargs.pop("params", {})}
-            ac = getattr(self.pool, "_auth_config", None)
-            if ac and ac.in_ == "query":
-                params[ac.query_param] = key.token
-            else:
-                h = ac.header if ac else getattr(self.pool, "_auth_header", "Authorization")
-                s = ac.scheme if ac else getattr(self.pool, "_auth_scheme", "Bearer")
-                headers[h] = f"{s} {key.token}".strip()
+            headers = dict(supplied_headers)
+            params = (
+                dict(supplied_params)
+                if isinstance(supplied_params, Mapping)
+                else list(supplied_params)
+            )
+            _auth_values(self.pool, key, headers, params)
             try:
-                resp = await client.request(method, url, headers=headers, params=params, **kwargs)
+                resp = await client.request(
+                    method, url, headers=headers, params=params, **base_kwargs
+                )
                 self.pool._mark_result(key, resp.status_code, resp.headers, None)
-                if resp.status_code == 429:  # noqa: PLR2004, http status code can be constant
-                    with contextlib.suppress(Exception):
-                        self.pool._logger.info(
-                            f"429 on endpoint={self.endpoint} key={key.name}; rotating"
-                        )
-                    attempts += 1
-                    continue
-                return resp
-            except (httpx.TransportError, httpx.TimeoutException) as e:
+                last_resp = resp
+                if (
+                    method not in retry_methods
+                    or resp.status_code != 429  # noqa: PLR2004, http status code can be constant
+                ):
+                    return resp
+                attempts += 1
+                if attempts >= max_attempts:
+                    return resp
+                with contextlib.suppress(Exception):
+                    await _release_response(resp)
+                continue
+            except httpx.TransportError as e:
                 self.pool._mark_result(key, None, {}, e)
                 attempts += 1
                 last_err = e
+                if method not in retry_methods:
+                    raise
                 continue
+            except Exception as exc:
+                # Always release the key before surfacing programming/client errors.
+                if key.in_use_by is not None:
+                    self.pool._mark_result(key, None, {}, exc)
+                raise
         if last_err:
             raise last_err
+        if last_resp is not None:
+            return last_resp
         raise RuntimeError("rotisserie: failed after retries")
 
     async def get(self, url, **kw):
@@ -149,33 +199,61 @@ class _AiohttpRequestCtx:
         self.kwargs = kwargs
         self._resp = None
         self._key = None
+        self._marked = False
 
     async def __aenter__(self):
-        self._key = await self.outer.pool._take_key(self.outer.endpoint)
-        headers = {**self.kwargs.pop("headers", {})}
-        params = {**self.kwargs.pop("params", {})}
-        ac = getattr(self.outer.pool, "_auth_config", None)
-        if ac and ac.in_ == "query":
-            params[ac.query_param] = self._key.token
-        else:
-            h = ac.header if ac else getattr(self.outer.pool, "_auth_header", "Authorization")
-            s = ac.scheme if ac else getattr(self.outer.pool, "_auth_scheme", "Bearer")
-            headers[h] = f"{s} {self._key.token}".strip()
-        self._resp = await self.outer.session.request(
-            self.method, self.url, headers=headers, params=params, **self.kwargs
-        )
-        # user will await/read and exit; mark result on exit
+        method = self.method.upper()
+        base_kwargs = dict(self.kwargs)
+        supplied_headers = dict(base_kwargs.pop("headers", {}) or {})
+        supplied_params = base_kwargs.pop("params", {}) or {}
+        if not isinstance(supplied_params, Mapping):
+            supplied_params = list(supplied_params)
+        retry_methods = getattr(self.outer.pool, "_retry_methods", {"GET", "HEAD", "OPTIONS"})
+        attempts = 0
+        while attempts < getattr(self.outer.pool, "_max_attempts", 8):
+            self._key = await self.outer.pool._take_key(self.outer.endpoint)
+            headers = dict(supplied_headers)
+            params = (
+                dict(supplied_params)
+                if isinstance(supplied_params, Mapping)
+                else list(supplied_params)
+            )
+            _auth_values(self.outer.pool, self._key, headers, params)
+            try:
+                self._resp = await self.outer.session.request(
+                    method, self.url, headers=headers, params=params, **base_kwargs
+                )
+                status = getattr(self._resp, "status", None)
+                self.outer.pool._mark_result(
+                    self._key,
+                    status,
+                    dict(getattr(self._resp, "headers", {}) or {}),
+                    None,
+                )
+                self._marked = True
+                if method not in retry_methods or status != 429:  # noqa: PLR2004
+                    return self._resp
+                attempts += 1
+                if attempts >= getattr(self.outer.pool, "_max_attempts", 8):
+                    return self._resp
+                with contextlib.suppress(Exception):
+                    await _release_response(self._resp)
+            except Exception as exc:
+                if self._key.in_use_by is not None:
+                    self.outer.pool._mark_result(self._key, None, {}, exc)
+                raise
         return self._resp
 
     async def __aexit__(self, exc_type, exc, tb):
         # Ensure response is released/closed
         try:
-            if self._resp is not None and not self._resp.closed:
-                await self._resp.release()
+            if self._resp is not None and not getattr(self._resp, "closed", False):
+                await _release_response(self._resp)
         finally:
             status = getattr(self._resp, "status", None) if self._resp else None
             headers = dict(getattr(self._resp, "headers", {}) or {})
-            self.outer.pool._mark_result(self._key, status, headers, exc)
+            if not self._marked and self._key is not None:
+                self.outer.pool._mark_result(self._key, status, headers, exc)
         return False
 
 
@@ -196,8 +274,7 @@ class AiohttpClientContext:
 
     async def __aenter__(self):
         if self.session is None:
-            import aiohttp  # noqa: PLC0415
-
+            aiohttp = _require_dependency("aiohttp", "aiohttp")
             self.session = aiohttp.ClientSession()
             self._own_session = True
         else:

@@ -31,7 +31,7 @@ def _parse_env_file(env_path: str) -> dict[str, str]:
     return values
 
 
-def load_keyconfigs_from_env(
+def load_keyconfigs_from_env(  # noqa: PLR0912
     names: Union[Iterable[str], None] = None,
     prefix: Union[str, None] = None,
     per_window: Union[tuple[int, int], None] = None,
@@ -52,9 +52,9 @@ def load_keyconfigs_from_env(
         take precedence over the file.
 
     kwargs keywords:
-    to_lower_names: make names lowercase (default True)
+    to_lower_names: make names lowercase (default False)
     split_commas: split comma-separated values (default True)
-    strip_prefix: strip prefix from names (default True)
+    strip_prefix: strip prefix from names (default False)
     """
     # Build a lookup map: actual environment takes precedence over .env file
     file_env = _parse_env_file(env_path) if env_path else {}
@@ -66,6 +66,17 @@ def load_keyconfigs_from_env(
     to_lower_names = kwargs.get("to_lower_names", False)
     strip_prefix = kwargs.get("strip_prefix", False)
 
+    seen: set[tuple[str, str]] = set()
+
+    def add_config(name: str, token: str) -> None:
+        token = token.strip()
+        if not token or (name, token) in seen:
+            return
+        seen.add((name, token))
+        results.append(KeyConfig(name=name, token=token, per_window=per_window))
+
+    if isinstance(names, str):
+        names = [names]
     if names:
         for var in names:
             token = env_map.get(var)
@@ -74,15 +85,9 @@ def load_keyconfigs_from_env(
             cfg_name = var.lower() if to_lower_names else var
             if split_commas and "," in token:
                 for idx, part in enumerate([t.strip() for t in token.split(",") if t.strip()]):
-                    results.append(
-                        KeyConfig(
-                            name=f"{cfg_name}_{idx + 1}",
-                            token=part,
-                            per_window=per_window,
-                        )
-                    )
+                    add_config(f"{cfg_name}_{idx + 1}", part)
             else:
-                results.append(KeyConfig(name=cfg_name, token=token, per_window=per_window))
+                add_config(cfg_name, token)
 
     if prefix:
         for var, token in env_map.items():
@@ -92,14 +97,8 @@ def load_keyconfigs_from_env(
             cfg_name = name_part.lower() if to_lower_names else name_part
             if split_commas and "," in token:
                 for idx, part in enumerate([t.strip() for t in token.split(",") if t.strip()]):
-                    results.append(
-                        KeyConfig(
-                            name=f"{cfg_name}_{idx + 1}",
-                            token=part,
-                            per_window=per_window,
-                        )
-                    )
+                    add_config(f"{cfg_name}_{idx + 1}", part)
             else:
-                results.append(KeyConfig(name=cfg_name, token=token, per_window=per_window))
+                add_config(cfg_name, token)
 
     return results

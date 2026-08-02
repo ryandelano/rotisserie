@@ -1,292 +1,293 @@
 # rotisserie
 
-Key pooling, rotation, and **priority-aware** distribution that works with your existing HTTP stack (`requests`, `httpx`, `aiohttp`).
+Key pooling, rotation, and priority-aware distribution for `requests`, `httpx`, and
+`aiohttp`.
 
-- Pool many API keys for the same vendor
-- Reserve a baseline per endpoint (`reserve`), then redistribute freed keys by priority
-- Auto-rotate on `429` via `Retry-After` or exponential cooldown
-- Choose how extras are allocated: even across priorities, or funneled to the highest
-
-> This does not help you circumvent vendor TOS. Only use multi-key if allowed.
+Rotisserie is useful when one vendor gives you several API keys and you need to share
+them across endpoints without writing key-selection, cooldown, or retry plumbing in
+every client. Use it only where the vendor permits multiple keys.
 
 ## Install
 
+Install the core package, then add the extra for the HTTP client you use:
+
 ```bash
 pip install rotisserie
-# Optional extras for convenience wrappers
-pip install "rotisserie[requests]" "rotisserie[httpx]" "rotisserie[aiohttp]"
+pip install "rotisserie[requests]"   # requests integration
+pip install "rotisserie[httpx]"       # httpx integration
+pip install "rotisserie[aiohttp]"     # aiohttp integration
 ```
 
-## 1) One auth to rule them all (start here)
+## Quick start
 
-The simplest and most flexible way to use rotisserie is the universal `auth` object.
-
-### requests (sync)
+`from_tokens()` is the shortest path when you already have token values. Names are
+generated automatically, or you can pass a `{name: token}` mapping.
 
 ```python
-from rotisserie import KeyPool, KeyConfig
 import requests
+from rotisserie import KeyPool
 
-pool = KeyPool([KeyConfig("k1", "KEY_1"), KeyConfig("k2", "KEY_2")])
+pool = KeyPool.from_tokens({"primary": "KEY_1", "backup": "KEY_2"})
 
-with pool.auth(endpoint="orders", reserve=2, priority=1) as auth:
-    r = requests.get("https://api.example.com/orders", auth=auth)
-    print(r.status_code)
+with pool.auth(endpoint="orders", reserve=1) as auth:
+    response = requests.get("https://api.example.com/orders", auth=auth)
+    response.raise_for_status()
 ```
 
-### httpx (sync and async)
+The `auth` context registers the endpoint, applies its reserve and priority, selects a
+key for each request, records the response, and rotates on retryable `429` responses.
+Keep one auth context open for the lifetime of the client or request batch that uses
+that endpoint.
+
+## Choose your integration
+
+| HTTP client | Recommended entry point | Request style |
+| --- | --- | --- |
+| `requests` | `pool.auth(...)` | `requests.get(..., auth=auth)` |
+| `httpx` sync | `pool.auth(...)` | `httpx.Client(auth=auth)` |
+| `httpx` async | `async_pool.auth(...)` | `httpx.AsyncClient(auth=auth)` |
+| `aiohttp` | `async_pool.auth(...)` | `auth.get(...)`, `auth.request(...)`, or `wrap_session(...)` |
+| custom client | `pool.endpoint(...)` | `take_key()` + `mark_result()` |
+
+### requests
+
+```python
+import requests
+from rotisserie import KeyPool
+
+pool = KeyPool.from_tokens(["KEY_1", "KEY_2"])
+
+with pool.auth("orders", reserve=2, priority=1) as auth:
+    response = requests.get(
+        "https://api.example.com/orders",
+        auth=auth,
+        timeout=10,
+    )
+```
+
+For a client that already owns a `requests.Session`, use the convenience wrapper:
+
+```python
+session = requests.Session()
+with pool.requests_client("orders", reserve=2, session=session) as client:
+    response = client.get("https://api.example.com/orders", timeout=10)
+```
+
+### httpx, sync or async
+
+The universal auth object implements HTTPX's auth protocol, including retrying
+configured methods after a `429`.
 
 ```python
 import httpx
-from rotisserie import KeyPool, KeyConfig
+from rotisserie import KeyPool
 
-pool = KeyPool([KeyConfig("k1", "KEY_1"), KeyConfig("k2", "KEY_2")])
+pool = KeyPool.from_tokens(["KEY_1", "KEY_2"])
 
-with pool.auth(endpoint="users", reserve=2, priority=1) as auth:
-    with httpx.Client(auth=auth) as client:
-        r = client.get("https://api.example.com/users")
-
-# async
-import asyncio, httpx
-from rotisserie import AsyncKeyPool, KeyConfig
-
-apool = AsyncKeyPool([KeyConfig("a", "A"), KeyConfig("b", "B")])
-
-async def main():
-    async with apool.auth(endpoint="events", reserve=2, priority=1) as auth:
-        async with httpx.AsyncClient(auth=auth) as client:
-            r = await client.get("https://api.example.com/events")
-            print(r.status_code)
-
-asyncio.run(main())
+with pool.auth("users") as auth, httpx.Client(auth=auth) as client:
+    response = client.get("https://api.example.com/users")
 ```
 
-### aiohttp (async)
-
-Two options:
-
-- Minimal changes: add a trace config and patch the session for transparent retries
-- Decorator style: explicit request helpers as async context managers
+Async usage is the same shape with `AsyncKeyPool` and `async with`:
 
 ```python
-import asyncio, aiohttp
-from rotisserie import AsyncKeyPool, KeyConfig
+import httpx
+from rotisserie import AsyncKeyPool
 
-apool = AsyncKeyPool([KeyConfig("a","A"), KeyConfig("b","B")])
+pool = AsyncKeyPool.from_tokens(["KEY_1", "KEY_2"])
 
-async def main():
-    async with apool.auth(endpoint="events", reserve=2, priority=1) as auth:
-        async with aiohttp.ClientSession(trace_configs=[auth.trace_config()]) as s:
-            auth.wrap_session(s)  # optional: enables automatic 429 retries using same session
-            async with s.get("https://api.example.com/events") as resp:
-                print(resp.status)
-
-asyncio.run(main())
+async def fetch_users():
+    async with pool.auth("users") as auth, httpx.AsyncClient(auth=auth) as client:
+        return await client.get("https://api.example.com/users")
 ```
 
-Decorator style (no patching):
+If you prefer an explicit managed wrapper, use `pool.httpx_client(...)`:
 
 ```python
-import asyncio, aiohttp
-from rotisserie import AsyncKeyPool, KeyConfig
-
-apool = AsyncKeyPool([KeyConfig("a","A"), KeyConfig("b","B")])
-
-async def main():
-    async with apool.auth(endpoint="events", reserve=2, priority=1) as auth:
-        async with aiohttp.ClientSession() as s:
-            async with auth.get(s, "https://api.example.com/events?limit=1000") as resp:
-                print(resp.status, await resp.text())
-            async with auth.request(s, "GET", "https://api.example.com/users") as resp:
-                print(resp.status)
-
-asyncio.run(main())
+async with pool.httpx_client("users", reserve=2) as client:
+    response = await client.get("https://api.example.com/users")
 ```
 
-## 2) Configure how auth and retries behave
+### aiohttp
 
-You can set defaults at the pool level and override per `auth` context.
-
-### Global defaults via the pool
+For explicit request helpers, no session monkey-patching is needed:
 
 ```python
-from rotisserie import KeyPool, KeyConfig, AuthConfig, RetryConfig
+import aiohttp
+from rotisserie import AsyncKeyPool
 
-pool = KeyPool(
-    [KeyConfig("k1","K1"), KeyConfig("k2","K2")],
-    # how extras are allocated across priorities if not explicitly set later
-    distribute=True,
-    # Auth defaults (header vs query)
-    auth_config=AuthConfig(header="Authorization", scheme="Bearer", in_="header", query_param="api_key"),
-    # or the shorthand fields:
-    # auth_header="Authorization", auth_scheme="Bearer", auth_in="header", auth_query_param="api_key",
-    # Retry defaults
+pool = AsyncKeyPool.from_tokens(["KEY_1", "KEY_2"])
+
+async def fetch_events():
+    async with pool.auth("events") as auth, aiohttp.ClientSession() as session:
+        async with auth.get(session, "https://api.example.com/events") as response:
+            return await response.json()
+```
+
+For an existing session, `wrap_session()` transparently injects credentials and retries
+configured methods while preserving that session's connector:
+
+```python
+async with pool.auth("events") as auth, aiohttp.ClientSession() as session:
+    auth.wrap_session(session)
+    async with session.get("https://api.example.com/events") as response:
+        ...
+    auth.unwrap_session(session)  # optional; useful before reusing the session elsewhere
+```
+
+`trace_config()` is a lightweight header-injection/accounting option when using header
+auth. Aiohttp trace parameters cannot be mutated to add a query string; for query auth,
+use `auth.request()`/`auth.get()` or `wrap_session()` instead.
+
+## Configure authentication and retries
+
+Pool constructor options are explicit and editor-friendly:
+
+```python
+from rotisserie import AuthConfig, KeyPool, RetryConfig
+
+pool = KeyPool.from_tokens(
+    ["KEY_1", "KEY_2"],
+    auth_config=AuthConfig(
+        in_="query",
+        query_param="api_key",
+    ),
     retry_config=RetryConfig(
-        retry_after_base=0.5, retry_after_growth=2.0, retry_after_cap=30.0,
-        error_base=0.25, error_growth=2.0, error_cap=5.0,
-        retry_attempts=8, retry_for_methods=["GET", "HEAD", "OPTIONS"],
+        retry_attempts=4,
+        retry_for_methods=["GET", "HEAD"],
+        retry_after_cap=30,
+        error_cap=5,
     ),
 )
 ```
 
-### Per-auth overrides (per block, per endpoint)
+Supported auth fields are `header`, `scheme`, `in_` (`"header"` or `"query"`), and
+`query_param`. You can use shorthand pool options such as `auth_header="X-API-Key"`
+and `auth_in="query"`. Per-endpoint overrides are passed to `pool.auth(...)`:
 
 ```python
-from rotisserie import AuthConfig, RetryConfig
-
 with pool.auth(
-    endpoint="search", reserve=2, priority=1,
-    # override how the token is sent for this endpoint
-    auth_config=AuthConfig(in_="query", query_param="api_key"),
-    # or shorthand: auth_in="query", auth_query_param="api_key",
-    # override retry policy for this block only
-    retry_config=RetryConfig(retry_attempts=4, retry_for_methods=["GET","POST","HEAD"]),
+    "search",
+    reserve=2,
+    priority=1,
+    auth_in="query",
+    auth_query_param="api_key",
+    retry_attempts=2,
 ) as auth:
     ...
 ```
 
-Tip: For one-shot manual injection (no automatic retry), you can do:
+By default only `GET`, `HEAD`, and `OPTIONS` retry on `429`. Add `POST` or another
+method explicitly only when repeating that request is safe for your API.
 
-```python
-with pool.auth(endpoint="users", reserve=1, priority=1) as auth:
-    headers = auth.headers()  # {"Authorization": "Bearer <token>"}
-    # use headers with any HTTP client; you must handle 429 yourself
+## Load keys from environment variables
+
+`from_env()` merges the real environment with an optional `.env` file. Real environment
+values win, and the loader does not mutate `os.environ`.
+
+```bash
+# .env
+VENDOR_API_KEYS=KEY_1,KEY_2
 ```
-
-## 3) Keys from environment and .env (simple and robust)
-
-You can build keys from explicit names or by scanning a prefix. The loader merges the real environment and a `.env` file (if provided) without mutating `os.environ`. Values in the real environment win over the file.
-
-### Using KeyPool.from_env (convenience)
 
 ```python
 from rotisserie import KeyPool
 
-# .env example:
-#   API_KEY_ALPHA=a1,a2
-#   API_KEY_BETA=b1
 pool = KeyPool.from_env(
-    prefix="API_KEY_",          # scan by prefix
-    env_path=".env",            # optional
-    per_window=(60, 60),         # optional per-key local window
-    distribute=True,
-    to_lower_names=True,        # optional kwargs
+    prefix="VENDOR_",
+    env_path=".env",
     split_commas=True,
     strip_prefix=True,
-)
-
-# Or explicit names (comma-splitting also supported when flagged)
-pool2 = KeyPool.from_env(
-    names=["EXAMPLE_API_KEY"],
-    env_path=".env",
     to_lower_names=True,
-    split_commas=True,
 )
 ```
 
-### Using the loader directly
+The loader also supports explicit variables:
 
 ```python
-from rotisserie import load_keyconfigs_from_env, KeyPool
-
-cfgs = load_keyconfigs_from_env(
-    names=["A_KEY"],
-    per_window=(100, 60),
+pool = KeyPool.from_env(
+    names=["VENDOR_PRIMARY", "VENDOR_BACKUP"],
     env_path=".env",
-    to_lower_names=True,
-    split_commas=True,
 )
-pool = KeyPool(cfgs)
 ```
 
-Flags you can pass (as kwargs keywords):
-
-- "to_lower_names": lowercases config names
-- "split_commas": splits comma-separated tokens into multiple keys
-- "strip_prefix": when scanning by prefix, drop the prefix from the resulting names
-
-## 4) Priorities, reserves, and distribution (how keys move)
-
-- `priority=1` is highest; lower numbers first
-- `reserve` assigns a baseline of keys per endpoint
-- When an endpoint exits, its keys are redistributed to others:
-  - `distribute=True`: round-robin across priorities
-  - `distribute=False`: funnel to highest priority first
+Use `per_window=(limit, seconds)` when you want local throttling before the vendor
+returns a `429`:
 
 ```python
-from rotisserie import KeyPool, KeyConfig
-
-pool = KeyPool([KeyConfig(f"k{i}", f"T{i}") for i in range(6)], distribute=True)
-with (
-    pool.endpoint("e1", reserve=1, priority=1),
-    pool.endpoint("e2", reserve=1, priority=1),
-    pool.endpoint("e3", reserve=1, priority=2),
-):
-    ...  # keys are assigned and rebalanced automatically
+pool = KeyPool.from_env(prefix="VENDOR_", per_window=(60, 60))
 ```
 
-## 5) Policies: even, weighted, or custom
+## Reserves, priorities, and distribution
 
-Pass `policy="even"` (default), `policy="weighted"`, or a callable.
+- Lower `priority` numbers are more important; `priority=1` is highest.
+- `reserve` is the preferred baseline number of keys for an endpoint.
+- `distribute=True` spreads extra free keys across priority groups.
+- `distribute=False` funnels extra free keys to the highest-priority endpoint first.
+
+```python
+from rotisserie import KeyPool
+
+pool = KeyPool.from_tokens([f"TOKEN_{i}" for i in range(6)], distribute=True)
+with pool.endpoint("critical", reserve=1, priority=1):
+    with pool.endpoint("reports", reserve=1, priority=2):
+        ...
+```
+
+## Policies
+
+Use `policy="even"` (the default), `policy="weighted"`, or a callable. A selection
+callable receives `(available, n)` or `(available, n, endpoint)` and returns a list of
+keys. A ranking callable receives `(key)` or `(key, endpoint)` and returns a comparable
+score.
 
 ```python
 import time
-from rotisserie import KeyPool, KeyConfig
+from rotisserie import KeyPool
 
-# Selection function: (available, n[, endpoint]) -> List[KeyState]
-def pick_by_eta(available, n, endpoint):
-    now = time.time()
-    return sorted(
-        available,
-        key=lambda k: (k.next_available_at(now), -(k.remaining or 0), k.failures, k.successes),
-    )[:n]
-
-pool = KeyPool([KeyConfig("k1","T1"), KeyConfig("k2","T2")], policy=pick_by_eta)
-
-# Key function: (key[, endpoint]) -> comparable
-def eta_score(key, endpoint):
+def soonest_available(key, endpoint):
     return key.next_available_at(time.time())
 
-pool2 = KeyPool([KeyConfig("k1","T1"), KeyConfig("k2","T2")], policy=eta_score)
+pool = KeyPool.from_tokens(["KEY_1", "KEY_2"], policy=soonest_available)
 ```
 
-## 6) Convenience client wrappers (optional)
+## Custom HTTP clients
 
-Prefer the universal `auth`. If you want context-managed clients:
+Use the low-level API when your client is not one of the built-in integrations:
 
 ```python
-from rotisserie import KeyPool, AsyncKeyPool, KeyConfig
+from rotisserie import KeyPool
 
-pool = KeyPool([KeyConfig("k1","T1"), KeyConfig("k2","T2")])
-with pool.requests_client(endpoint="users", reserve=2, priority=1) as client:
-    r = client.get("https://api.example.com/users")
+pool = KeyPool.from_tokens({"one": "KEY_1", "two": "KEY_2"})
 
-apool = AsyncKeyPool([KeyConfig("a","A"), KeyConfig("b","B")])
-async def main():
-    async with apool.httpx_client(endpoint="orders", reserve=2, priority=1) as client:
-        r = await client.get("https://api.example.com/orders")
-    async with apool.aiohttp_client(endpoint="events", reserve=2, priority=1) as client:
-        async with client.get("https://api.example.com/events") as resp:
-            print(resp.status)
+with pool.endpoint("orders", reserve=1, priority=1):
+    key = pool.take_key("orders")
+    try:
+        response = my_client.get(
+            "https://api.example.com/orders",
+            headers={"Authorization": f"Bearer {key.token}"},
+        )
+    except Exception as error:
+        pool.mark_result(key, None, {}, error)
+    else:
+        pool.mark_result(
+            key,
+            response.status,
+            dict(response.headers),
+            None,
+        )
 ```
 
-## 7) Direct integration (custom clients)
+Always call `mark_result()` exactly once for every key acquired with `take_key()`.
+The result is what releases the key and updates cooldown/work statistics.
 
-```python
-from rotisserie import KeyPool, KeyConfig
-import some_custom_http
+## Troubleshooting
 
-pool = KeyPool([KeyConfig("k1","T1"), KeyConfig("k2","T2")], distribute=True)
-
-with pool.endpoint("my_endpoint", reserve=2, priority=1):
-    for url in urls:
-        key = pool.take_key("my_endpoint")
-        try:
-            resp = some_custom_http.get(url, headers={"Authorization": f"Bearer {key.token}"})
-            pool.mark_result(key, getattr(resp, "status", 200), getattr(resp, "headers", {}), None)
-        except Exception as e:
-            pool.mark_result(key, None, {}, e)
-```
+- `unexpected pool option(s)` means a pool option is misspelled or unsupported.
+- `cannot acquire a key from an empty pool` means environment lookup returned no keys.
+- Install the matching optional extra when an integration reports a missing dependency.
+- Query auth with aiohttp requires `auth.request()`/`auth.get()` or `wrap_session()`;
+  `trace_config()` only supports header injection.
 
 ## License
 
